@@ -1,6 +1,6 @@
 import numpy as np
 import cv2
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 from skimage import io, measure, filters
 from PIL import Image, ImageDraw, ImageFont
 
@@ -10,7 +10,7 @@ by qidongxu
 '''
 
 
-COLOR_LIST = [(255, 0, 0), (0, 0, 255), (0, 255, 0), (120, 120, 0)]  # 画box时的颜色
+COLOR_LIST = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (120, 120, 0)]  # 画box时的颜色
 CLASSES_LIST = ['text', 'tableRegion', 'figureRegion', 'formulaRegion']
 NAME_LIST = ['text', 'table', 'figure', 'equation']
 
@@ -101,8 +101,6 @@ def bbox_from_rlsa(img_rlsa, mask, label_num):
     img_rlsa_res = 255 - img_rlsa_res  # 这里取决于二值化时，是否把背景设为白，如果是就需要翻转
     rlsa_label = measure.label(img_rlsa_res, connectivity=1)
     rlsa_props = measure.regionprops(rlsa_label)
-    print('bboxes number of %s : %d' %
-          (NAME_LIST[label_num-1], rlsa_label.max()))
     rlsa_boxes = [r['bbox'] for r in rlsa_props]
     rlsa_boxes = np.reshape(rlsa_boxes, (-1, 4))
     # labels = np.int32([label_num] * len(rlsa_boxes))
@@ -110,11 +108,33 @@ def bbox_from_rlsa(img_rlsa, mask, label_num):
 
 
 # 针对图片表格，直接用热图
-def cur_from_mask(mask, label):
+def bbox_from_mask(mask, c):
     '''
-    label: {2-table, 3-figure}
+    c: label {2-table, 3-figure}
     '''
-    
+    height, width, num_classes = mask.shape
+    mask_classes = np.argmax(mask, axis=2)
+
+    mask_class = np.int32(mask_classes == c)
+    mask_label = measure.label(mask_class, connectivity=1)
+    props = measure.regionprops(mask_label)
+
+    bboxs_class = [prop['bbox'] for prop in props]
+    bboxs_class = np.reshape(bboxs_class, (-1, 4))
+
+    labels = c * np.ones(len(bboxs_class))
+
+    confs_class = []
+    for idx in range(len(bboxs_class)):
+        bbox = bboxs_class[idx, :]
+        conf = np.mean(mask[bbox[0]:bbox[2], bbox[1]:bbox[3], c]) / 255.0
+        confs_class.append(conf)
+
+    # Format
+    bboxs_class = np.int32(bboxs_class)
+    labels = np.int32(labels)
+    return bboxs_class, labels, confs_class
+
 
 def draw_bbox(img, bboxs, labels):
     ''' Visualization of detection results. '''
@@ -210,15 +230,13 @@ def MergeTextBBox_row(boxes, value1=15, value2=8):  # 纵向合并
             out_boxes.append(A)
             A = B
     out_boxes.append(A)  # 处理边界条件 i= N-1，加上最后一个
-    # out_boxes = np.array(out_boxes)
+    out_boxes = np.array(out_boxes)
     return out_boxes
 
 
-def process_one(img_path, mask_path):
+def process_one(img, mask, ifshow=False):
     value1 = 15
     value2 = 8
-    mask = np.load(mask_path)
-    img = cv2.imread(img_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     (thresh, image_binary) = cv2.threshold(
         gray, 150, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
@@ -233,67 +251,42 @@ def process_one(img_path, mask_path):
     merge_boxes = PreForRowMerge(merge_boxes)
     text_rlsa_boxes = MergeTextBBox_row(merge_boxes, value1, value2)
     text_labels = np.int32([1] * len(text_rlsa_boxes))
-
-    table_rlsa_boxes = bbox_from_rlsa(img_rlsa, mask, 2)
-    # table_rlsa_boxes_ = table_rlsa_boxes.tolist()
-    # merge_boxes = MergeTextBBox_col(table_rlsa_boxes_)  # 横向合并
-    # merge_boxes = sorted(merge_boxes, key=lambda x: x[1])
-    # merge_boxes = PreForRowMerge(merge_boxes)
-    # table_rlsa_boxes = MergeTextBBox_row(merge_boxes)
-    table_labels = np.int32([2] * len(table_rlsa_boxes))
-
-    figure_rlsa_boxes = bbox_from_rlsa(img_rlsa, mask, 3)
-    figure_labels = np.int32([3] * len(figure_rlsa_boxes))
-
+    # print('bboxes number of text : %d' % len(text_rlsa_boxes))
+    table_boxes, table_labels, table_confs = bbox_from_mask(mask, 2)
+    # print('bboxes number of table : %d' % len(table_boxes))
+    figure_boxes, figure_labels, figure_confs = bbox_from_mask(mask, 3)
+    # print('bboxes number of figure : %d' % len(figure_boxes))
     formula_rlsa_boxes = bbox_from_rlsa(img_rlsa, mask, 4)
     formula_labels = np.int32([4] * len(formula_rlsa_boxes))
+    # print('bboxes number of formula : %d' % len(formula_rlsa_boxes))
 
     # 上面4类分开写是因为，不同类的处理方可能不同，先留有余地
+    # print(text_rlsa_boxes.shape)
+    # print(table_boxes.shape)
+    # print(figure_boxes.shape)
+    # print(formula_rlsa_boxes.shape)
 
-    boxes = np.concatenate((text_rlsa_boxes, table_rlsa_boxes,
-                            figure_rlsa_boxes, formula_rlsa_boxes), axis=0)
+    boxes = np.concatenate((text_rlsa_boxes, table_boxes,
+                            figure_boxes, formula_rlsa_boxes), axis=0)
     labels = np.concatenate(
         (text_labels, table_labels, figure_labels, formula_labels), axis=0)
     # print(boxes.shape)
     # print(labels.shape)
 
     process_one_img = draw_bbox(img, boxes, labels)
-    Image.fromarray(process_one_img).show()
-    return None
+    if ifshow:
+        Image.fromarray(process_one_img).show()
+    return process_one_img
 
 
 def main():
-    img_path = "E:/project/jupyter/rlsa/img/1708OP01183_page86.jpg"
-    mask_path = "E:/project/jupyter/rlsa/img/1708OP01183_page86.npy"
-    process_one(img_path, mask_path)
-    # mask = np.load(mask_path)
-    # img = cv2.imread(img_path)
-    # gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # (thresh, image_binary) = cv2.threshold(
-    #     gray, 150, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    # rlsa_thresh_h, rlsa_thresh_v = 15, 8
-    # img_rlsa = rlsa(image_binary, True, False, rlsa_thresh_h)
-    # img_rlsa = rlsa(img_rlsa, False, True, rlsa_thresh_v)
-    # rlsa_boxes, labels = bbox_from_rlsa(img_rlsa, mask, 1)
-
-    # img_return = draw_bbox(img, rlsa_boxes, labels)
-    # Image.fromarray(img_return).show()
-
-    # rlsa_boxes_ = rlsa_boxes.tolist()
-
-    # col_merge_boxes = MergeTextBBox_col(rlsa_boxes_)  # 横向合并
-    # col_merge_labels = np.int32([1] * len(col_merge_boxes))
-    # img_return_col = draw_bbox(img, np.array(col_merge_boxes), col_merge_labels)
-    # Image.fromarray(img_return_col).show()
-
-    # merge_boxes = sorted(col_merge_boxes, key= lambda x: x[1])
-    # merge_boxes = PreForRowMerge(merge_boxes)
-
-    # merge_boxes = MergeTextBBox_row(merge_boxes)
-    # merge_labels = np.int32([1] * len(merge_boxes))
-    # merge_return = draw_bbox(img, np.array(merge_boxes), merge_labels)
-    # Image.fromarray(merge_return).show()
-
+    img_path = "E:/project/jupyter/rlsa/img/1610QB02583_page42.jpg"
+    mask_path = "E:/project/jupyter/rlsa/img/1610QB02583_page42.npy"
+    mask = np.load(mask_path)
+    img = io.imread(img_path)  # cv2.imread 也可以
+    save_path = r'E:\project\table\rlsa\1.jpg'
+    one = process_one(img, mask, ifshow=True)
+    # plt.imsave(save_path, one)
 
 if __name__ == "__main__":
     main()
